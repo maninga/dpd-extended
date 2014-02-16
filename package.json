@@ -1,0 +1,14 @@
+{
+  "name": "dpd-extended",
+  "version": "0.0.1",
+  "description": "Extends Deployd making require() and context() available from event resources",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "deployd"
+  ],
+  "author": "-",
+  "license": "NONE"
+}
