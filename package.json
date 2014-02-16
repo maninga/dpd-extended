@@ -9,6 +9,7 @@
   "keywords": [
     "deployd"
   ],
+  "private": true,
   "author": "-",
   "license": "NONE"
 }
