@@ -3,6 +3,10 @@
   "version": "0.99.1",
   "description": "Extends Deployd making require() and context() available from event resources",
   "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git://github.com:maninga/dpd-extended.git"
+  },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
