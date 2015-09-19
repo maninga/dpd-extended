@@ -1,6 +1,6 @@
 {
   "name": "dpd-extended",
-  "version": "0.0.2",
+  "version": "0.99.1",
   "description": "Extends Deployd making require() and context() available from event resources",
   "main": "index.js",
   "scripts": {
