@@ -1,4 +1,38 @@
+/*
+ * Extensions for 'deployd/lib/config-loader'
+ *
+ * cache config in development mode if options.cache_config is true
+ *
+ */
+(function(Config) {
+  'use strict';
 
+  var debug = require('debug')('config-loader:extended');
+
+  Config._loadConfig = Config.loadConfig;
+  Config.loadConfig = function(basepath, server, fn) {
+    if (server.options && server.options.env === 'development' && !!server.options.cache_config) {
+      debug('WARNING: caching config in development env');
+      server.options.env = 'dev';
+      return Config._loadConfig(basepath, server, function(err, res){
+        server.options.env = 'development';
+        fn(err, res);
+      });
+    }
+    else {
+      return Config._loadConfig(basepath, server, fn);
+    }
+  };
+})(require('deployd/lib/config-loader'));
+
+/*
+ * Extensions for 'deployd/lib/script'
+ *
+ * add process() method to the domain that return the global process variable
+ * add context() method to the domain that return the script execution context
+ * add require(resource) method to the domain that proxies to global require
+ *
+ */
 (function(Script) {
   'use strict';
 
@@ -8,19 +42,47 @@
       domain.process = function() {
         return process;
       };
-      domain.require = function(resource) {
-        return require(resource);
-      };
       domain.context = function() { // access Context via context()
         return ctx;
+      };
+      domain.require = function(resource) {
+        return require(resource);
       };
     }
     _run.call(this, ctx, domain, fn);
   };
 })(require('deployd/lib/script'));
 
+
+/*
+ * Extensions for 'deployd/lib/resources/collection'
+ *
+ * monkeyPatch the Collection.prototype.count method so it is available to all requests
+ * monkeyPatch the Collection.prototype.indexOf method so it is available to all requests
+ * add Collection.prototype.distinct method to return distinct values for a given field
+ * add Collection.prototype.group method to compute basic mapReduction for a given field: sum, min, max, avg
+ * add Collection.prototype.sum method to pick sum property from Collection.prototype.group result
+ * add Collection.prototype.min method to pick min property from Collection.prototype.group result
+ * add Collection.prototype.max method to pick max property from Collection.prototype.group result
+ * add Collection.prototype.avg method to pick avg property from Collection.prototype.group result
+ * override Collection.prototype.handle method to take care of new methods (distinct, min, max)
+ * override Collection.prototype.sanitize to handle dot.notation in request body (for POST and PUT[ and DEL?])
+ * override Collection.prototype.sanitizeQuery to handle dot.notation in request query
+ * override Collection.prototype.execCommands to
+ *  - handle global commands (e.g $set{'deep.object.prop1': prop1Val, 'deep.object.prop2.sub1': prop2Sub1Val })
+ *  - handle dot.notation in operators
+ *  - handle more fields operator (thanks to mongodb fields operator)
+ *    -> previous operator list ($inc, $push, $pushAll, $pull, $pullAll, $addUnique)
+ *    -> added operator list    ($mul, $rename, $set, $unset, $min, $max, $currentDate)
+ *    -> current operator list  ($inc, $mul, $rename, $set, $unset, $min, $max, $currentDate, $push, $pushAll, $pull, $pullAll, $addUnique)
+ *
+ */
 (function(Collection) {
   'use strict';
+
+  var _ = require('lodash'),
+    debug = require('debug')('collection:extended'),
+    dot = require('dot-object');
 
   var _count = Collection.prototype.count;
   Collection.prototype.count = function(ctx, fn) {
@@ -60,26 +122,71 @@
     });
   };
 
+  var groupIds = Collection.groupIds = [
+    'group', 'sum', 'min', 'max', 'avg' /*,
+    maybe later
+    'population_variance', 'population_standard_deviation',
+    'sample_variance', 'sample_standard_deviation'
+    */
+  ];
+  var suggarIds = Collection.suggarIds = ['count', 'distinct', 'index-of'].concat(groupIds);
+
+  Collection.prototype.group = function(ctx, fn) {
+    var collection = this,
+      store = collection.store,
+      sanitizedQuery = collection.sanitizeQuery(ctx.query || {});
+
+    store.group(sanitizedQuery, function (err, result) {
+      if (err) { return fn(err); }
+
+      result = (result[0] && result[0].value) || {};
+      fn(null, result);
+    });
+  };
+
+  groupIds.slice(1).forEach(function(groupName) {
+    Collection.prototype[groupName] = function(ctx, fn) {
+      this.group(ctx, function(err, result){
+        if (err) { return fn(err); }
+
+        fn(null, _.pick(result, groupName));
+      });
+    };
+  });
+
+
   Collection.prototype.handle = function (ctx) {
     // set id one wasnt provided in the query
-    ctx.query.id = ctx.query.id || this.parseId(ctx) || (ctx.body && ctx.body.id);
+    var id = ctx.query.id = ctx.query.id || this.parseId(ctx) || (ctx.body && ctx.body.id);
 
-    if (ctx.req.method === 'GET' && ctx.query.id === 'count') {
+    if (ctx.req.method === 'GET' && id === 'index-of') {
+      delete ctx.query.id;
+      if (ctx.query.$fields) {
+        id = ctx.query.$fields;
+        delete ctx.query.$fields;
+      }
+      else {
+        id = ctx.url.split('/').filter(function(p) { return p; })[1];
+      }
+      this.indexOf(id, ctx, ctx.done);
+      return;
+    }
+
+    if (ctx.req.method === 'GET' && id === 'count') {
       delete ctx.query.id;
       this.count(ctx, ctx.done);
       return;
     }
 
-    if (ctx.req.method === 'GET' && ctx.query.id === 'distinct') {
+    if (ctx.req.method === 'GET' && id === 'distinct') {
       delete ctx.query.id;
       this.distinct(ctx, ctx.done);
       return;
     }
 
-    if (ctx.req.method === 'GET' && ctx.query.id === 'index-of') {
+    if (ctx.req.method === 'GET' && suggarIds.indexOf(id) !== -1) {
       delete ctx.query.id;
-      var id = ctx.url.split('/').filter(function(p) { return p; })[1];
-      this.indexOf(id, ctx, ctx.done);
+      this[id](ctx, ctx.done);
       return;
     }
 
@@ -102,10 +209,555 @@
     }
   };
 
+  /**
+   * Sanitize the request `body` against the `Collection` `properties`
+   * and return an object containing only properties that exist in the
+   * `Collection.config.properties` object.
+   *
+   * @param {Object} body
+   * @return {Object} sanitized
+   */
+
+  function adaptValue(value, expected, actual) {
+    if (!expected) {
+      if (actual === 'string' && ['{', '['].indexOf(value[0]) !== -1) {
+        return JSON.parse(value);
+      }
+      return value;
+    }
+    else if (expected === actual) {
+      return value;
+    }
+    else if (expected === 'array' && Array.isArray(value)) {
+      return value;
+    }
+    else if (expected === 'array' && actual === 'string' && value[0] === '[') {
+      return JSON.parse(value);
+    }
+    else if (expected === 'object' && actual === 'string' && value[0] === '{') {
+      return JSON.parse(value);
+    }
+    else if (expected === 'number' && actual === 'string') {
+      return parseFloat(value);
+    }
+    else if (expected === 'string' && actual === 'number') {
+      return '' + value;
+    }
+    else if (expected === 'boolean' && actual === 'string') {
+      return  (['1', 'y', 'true'].indexOf(value) !== -1) ? true : false;
+    }
+    else if (typeof value !== 'undefined') {
+      if (expected === 'boolean') {
+        return !!value;
+      }
+      else if(value === null && (expected === 'string' || expected === 'array')) {
+        // keep null
+        return value;
+      }
+
+    }
+    return value;
+  }
+
+  Collection.prototype.sanitize = function (body) {
+    if(!this.properties) { return {}; }
+
+    var copy = {},
+      sanitized = {},
+      props = this.properties,
+      propskeys = Object.keys(props),
+      bodyKeys = Object.keys(body),
+      subTypes = body._subTypes || {};
+
+    // copy body obj
+    Object.keys(body).forEach(function (key) {
+      copy[key] = _.clone(body[key]);
+    });
+
+    dot.object(body);
+
+    propskeys.forEach(function (key) {
+      var prop = props[key],
+        expected = prop.type,
+        val = body[key],
+        actual = typeof val,
+        matchingKeyReg = new RegExp('^' + key + '\\.'),
+        matchingKeys = bodyKeys.filter(function(k){ return matchingKeyReg.test(k); });
+
+      // skip properties that do not exist
+      if(!prop) { return; }
+
+      if(expected === actual) {
+        if (actual === 'object' && matchingKeys.length) {
+          matchingKeys.forEach(function(k){
+            sanitized[k] = adaptValue(copy[k], subTypes[k], typeof copy[k]);
+          });
+        }
+        else {
+          sanitized[key] = val;
+        }
+      }
+      else {
+        sanitized[key] = adaptValue(val, expected, actual);
+      }
+    });
+
+    return sanitized;
+  };
+
+  Collection.prototype.sanitizeQuery = function (query) {
+    var sanitized = {},
+      props = this.properties || {},
+      keys = (query && Object.keys(query)) || [],
+      subTypes = (query && query._subTypes) || {};
+
+    keys.forEach(function (key) {
+
+      // skip properties that have already been imported
+      if(key in sanitized) { return; }
+
+      var
+        propKey = key.split('.')[0],
+        prop = props[propKey],
+        expected = prop && prop.type,
+        val = query[key],
+        actual = (propKey === key) ? typeof val : 'object',
+        matchingKeyReg = new RegExp('^' + propKey + '\\.'),
+        matchingKeys = keys.filter(function(k){ return matchingKeyReg.test(k); });
+
+      // skip properties that do not exist, but allow $ queries and id
+      if(!prop && key.indexOf('$') !== 0 && key !== 'id') { return; }
+
+      // hack - $limitRecursion and $skipEvents are not mongo properties so we'll get rid of them, too
+      if (key === '$limitRecursion') { return; }
+      if (key === '$skipEvents') { return; }
+
+      if(actual === expected && expected === 'object') {
+        if (matchingKeys.length) {
+          matchingKeys.forEach(function(k){
+            sanitized[k] = adaptValue(query[k], subTypes[k], typeof query[k]);
+          });
+        }
+        else {
+          sanitized[key] = val;
+        }
+      }
+      else if (typeof val !== 'undefined') {
+        sanitized[key] = adaptValue(val, expected, actual);
+      }
+    });
+    debug('sanitizeQuery -> query: %j\n ---------------> sanitized: %j', query, sanitized);
+    return sanitized;
+  };
+
+  Collection.prototype.execCommands = function (type, obj, commands, previous) {
+    // var storeCommands = null;
+    debug('execCommands -> -------------- type: %s ----------------', type);
+    debug('execCommands -> obj:%s\n', JSON.stringify(obj, null, 2));
+    debug('execCommands -> commands:%s\n', JSON.stringify(commands), null, 2);
+
+    try {
+      if(type === 'insert') {
+        Object.keys(commands).forEach(function (key) {
+          if(typeof commands[key] === 'object') {
+            Object.keys(commands[key]).forEach(function (k) {
+              if(k[0] !== '$') { return; }
+
+              var val = commands[key][k];
+
+              if(k === '$setOnInsert') { /* added */
+                obj[key] = val;
+              }
+
+            });
+          }
+        });
+      }
+
+      if(type === 'update') {
+        debug('execCommands -> previous:%s', JSON.stringify(previous, null, 2));
+        Object.keys(commands).forEach(function (key) {
+          if(typeof commands[key] === 'object') {
+            Object.keys(commands[key]).forEach(function (k) {
+              if(k[0] !== '$') { return; }
+
+              var val = commands[key][k];
+              var prev = dot.pick(key, previous);
+
+              debug('\t -------------------------------------------------------');
+              debug('\t ---  val:%s = commands[key:%s][k:%s]', val, key, k);
+              debug('\t --- prev:%s = dot.pick(key:%s, previous)', prev, key);
+              debug('\t -------------------------------------------------------');
+
+              if(k === '$inc') {
+                debug('\t $inc --- before setting obj[key:%s]', key);
+                if(!prev) { prev = 0; }
+                prev = parseFloat(prev);
+                val = prev + parseFloat(val);
+                dot.set(key, val, obj, true);
+              }
+              if(k === '$mul') { /* added */
+                debug('\t $mul --- before setting obj[key:%s]', key);
+                if(!prev) { prev = 0; }
+                prev = parseFloat(prev);
+                val = prev * parseFloat(val);
+                dot.set(key, val, obj, true);
+              }
+              if(k === '$rename') { /* added */
+                debug('\t $rename --- before setting obj[key:%s]', key);
+                // we need to send $unset and $rename to the store
+                dot.set(val, prev, obj, true);
+                dot.del(key, obj);
+                // storeCommands = storeCommands || {};
+                // storeCommands.$unset = storeCommands.$unset || {};
+                // storeCommands.$unset[key] = true;
+              }
+              if(k === '$set') { /* added */
+                debug('\t $set --- before setting obj[key:%s] to val:%s', key, val);
+                dot.set(key, val, obj, true);
+                debug('\t $set --- after setting obj[key:%s] to val:%s --> %s', key, val, dot.pick(key, obj));
+              }
+              if(k === '$unset') { /* added */
+                debug('\t $unset --- before setting obj[key:%s]', key);
+                dot.del(key, obj);
+                // storeCommands = storeCommands || {};
+                // storeCommands.$unset = storeCommands.$unset || {};
+                // storeCommands.$unset[key] = true;
+              }
+              if(k === '$min') { /* added */
+                debug('\t $min --- before setting obj[key:%s]', key);
+                if(!prev) { prev = 0; }
+                prev = parseFloat(prev);
+                if (prev > val) {
+                  dot.set(key, val, obj, true);
+                }
+              }
+              if(k === '$max') { /* added */
+                debug('\t $max --- before setting obj[key:%s]', key);
+                if(!prev) { prev = 0; }
+                prev = parseFloat(prev);
+                if (prev < val) {
+                  dot.set(key, val, obj, true);
+                }
+              }
+              if(k === '$currentDate') { /* added */
+                debug('\t $currentDate --- before setting obj[key:%s]', key);
+                dot.str(key, new Date().getTime(), obj);
+                dot.set(key, new Date().getTime(), obj, true);
+              }
+              if(k === '$push') {
+                debug('\t $push --- before setting obj[key:%s]', key);
+                if(Array.isArray(prev)) {
+                  val = [].concat(prev).push(val);
+                  dot.set(key, val, obj, true);
+                } else {
+                  dot.set(key, [val], obj, true);
+                }
+              }
+              if(k === '$pushAll') {
+                debug('\t $pushAll --- before setting obj[key:%s]', key);
+                if(Array.isArray(prev)) {
+                  val = [].concat(prev).concat(val);
+                }
+                dot.set(key, val, obj, true);
+              }
+              if (k === '$pull') {
+                debug('\t $pull --- before setting obj[key:%s]', key);
+                if(Array.isArray(prev)) {
+                  val = prev.filter(function(item) {
+                    return item !== val;
+                  });
+                  dot.set(key, val, obj, true);
+                }
+              }
+              if (k === '$pullAll') {
+                debug('\t $pullAll --- before setting obj[key:%s]', key);
+                if(Array.isArray(prev)) {
+                  if(Array.isArray(val)) {
+                    val = prev.filter(function(item) {
+                      return val.indexOf(item) === -1;
+                    });
+                    dot.set(key, val, obj, true);
+                  }
+                }
+              }
+              if (k === '$addUnique') {
+                debug('\t $addUnique --- before setting obj[key:%s]', key);
+                val = Array.isArray(val) ? val : [val];
+                if(Array.isArray(prev)) {
+                  val = _.union(prev, val);
+                }
+                dot.set(key, val, obj, true);
+              }
+            });
+          }
+          else {
+            debug('############ typeof commands[key:%s] is %s, very bad !', key, typeof commands[key]);
+          }
+        });
+      }
+    } catch(e) {
+      debug('error while executing commands', type, obj, commands);
+      debug('error details: %s\nerror stack: %s', e, e.stack);
+    }
+    return this;
+  };
+
+  /**
+   * Execute the onPost or onPut listener. If it succeeds,
+   * save the given item in the collection.
+   *
+   * @param {Context} ctx
+   * @param {Function} fn(err, result)
+   */
+
+  Collection.prototype.save = function (ctx, fn) {
+    var collection = this,
+      store = this.store,
+      // session = ctx.session,
+      item = ctx.body,
+
+      query = ctx.query || {},
+      // client = ctx.dpd,
+      errors = {};
+
+    function done(err, item) {
+      errors = domain && domain.hasErrors() && {errors: errors};
+      debug('errors: %j', err);
+      fn(errors || err, item);
+    }
+
+    if(!item) {
+      return done('You must include an object when saving or updating.');
+    }
+
+    // extract mongoCommands first and transform them to commands
+    var commands = {};
+    Object.keys(item).forEach(function (key) {
+      if(key[0] === '$' && item[key] && typeof item[key] === 'object') {
+        Object.keys(item[key]).forEach(function (k) {
+          if (!item[k]) { item[k] = {}; }
+          item[k][key] = item[key][k];
+        });
+      }
+    });
+
+    // build command object
+    commands = {};
+    Object.keys(item).forEach(function (key) {
+      if(item[key] && typeof item[key] === 'object' && !Array.isArray(item[key])) {
+        Object.keys(item[key]).forEach(function (k) {
+          if(k[0] === '$') {
+            commands[key] = item[key];
+          }
+        });
+      }
+    });
+
+    item = this.sanitize(item);
+
+    // handle id on either body or query
+    if(item.id) {
+      query.id = item.id;
+    }
+
+    debug('saving %j with id %s', item, query.id);
+
+    var domain = collection.createDomain(item, errors);
+
+    domain.protectedKeys = [];
+
+    domain.protect = function(property) {
+      var propParts = property.split('.'),
+        realProp = propParts.pop(),
+        data = propParts.length ? dot.pick(propParts.join('.'), domain.data) : domain.data;
+
+      if (data.hasOwnProperty(realProp)) {
+        domain.protectedKeys.push(property);
+        delete data[realProp];
+      }
+    };
+
+    domain.changed =  function (property) {
+      var propParts = property.split('.'),
+        realProp = propParts.pop(),
+        data = propParts.length ? dot.pick(propParts.join('.'), domain.data) || {} : domain.data;
+
+      if(data.hasOwnProperty(realProp)) {
+        if(domain.previous && _.isEqual(dot.pick(property, domain.previous), data[realProp])) {
+          return false;
+        }
+
+        return true;
+      }
+      return false;
+    };
+
+    domain.previous = {};
+
+    function put() {
+      var id = query.id,
+        sanitizedQuery = collection.sanitizeQuery(query),
+        prev = {},
+        keys;
+
+      store.first(sanitizedQuery, function(err, obj) {
+        if(!obj) {
+          if (Object.keys(sanitizedQuery) === 1) {
+            return done(new Error('No object exists with that id'));
+          }
+          else {
+            return done(new Error('No object exists that matches that query'));
+          }
+        }
+        if(err) { return done(err); }
+
+        // copy previous obj
+        Object.keys(obj).forEach(function (key) {
+          prev[key] = _.clone(obj[key], true);
+        });
+
+        // merge changes ( obj[key] = item[key] )
+        keys = Object.keys(item);
+        dot.object(item);
+        keys.forEach(function (key) {
+          dot.copy(key, key, item, obj);
+        });
+
+        prev.id = id;
+        item = obj;
+        domain['this'] = item;
+        domain.data = item;
+        domain.previous = prev;
+
+        // var storeCommands = collection.execCommands('update', item, commands, prev) || {};
+        collection.execCommands('update', item, commands, prev);
+
+        var errs = collection.validate(item);
+
+        if (errs) { return done({errors: errs}); }
+
+        // if (storeCommands) {
+        //   _.assign(item, storeCommands);
+        // }
+
+        function runPutEvent(err) {
+          if(err) {
+            return done(err);
+          }
+
+          if(collection.shouldRunEvent(collection.events.Put, ctx)) {
+            collection.events.Put.run(ctx, domain, commit);
+          }
+          else {
+            commit();
+          }
+        }
+
+        function commit(err) {
+          if(err || domain.hasErrors()) {
+            return done(err || errors);
+          }
+
+          delete item.id;
+          store.update({id: query.id}, item, function (err) {
+            if(err) { return done(err); }
+            item.id = id;
+            collection.doAfterCommitEvent('PUT', ctx, item, prev, domain.protectedKeys);
+            done(null, item);
+          });
+        }
+
+        if (collection.shouldRunEvent(collection.events.Validate, ctx)) {
+          collection.events.Validate.run(ctx, domain, function (err) {
+            if(err || domain.hasErrors()) { return done(err || errors); }
+            runPutEvent(err);
+          });
+        }
+        else {
+          runPutEvent();
+        }
+      });
+    }
+
+    function post() {
+      collection.execCommands('insert', item, commands);
+      var errs = collection.validate(item, true);
+
+      if (errs) { return done({errors: errs}); }
+
+      // generate id before event listener
+      item.id = store.createUniqueIdentifier();
+
+      function commit(){
+        store.insert(item, function(err, data) {
+          if (err) { return done(err); }
+          collection.doAfterCommitEvent('POST', ctx, item);
+          done(null, data);
+        });
+      }
+
+      if(collection.shouldRunEvent(collection.events.Post, ctx)) {
+        collection.events.Post.run(ctx, domain, function (err) {
+          if(err) {
+            debug('onPost script error %j', err);
+            return done(err);
+          }
+          if(err || domain.hasErrors()) { return done(err || errors); }
+          debug('inserting item', item);
+
+          commit();
+        });
+      }
+      else {
+        commit();
+      }
+    }
+
+    var beforeRequestDomain = { event: 'POST', data: item };
+    collection.addDomainAdditions(beforeRequestDomain);
+
+    if (query.id) {
+      beforeRequestDomain.event = 'PUT';
+      collection.doBeforeRequestEvent(ctx, beforeRequestDomain, function(err) {
+        if (err) { return fn(err); }
+        put();
+      });
+    }
+    else if (collection.shouldRunEvent(collection.events.Validate, ctx)) {
+      collection.doBeforeRequestEvent(ctx, beforeRequestDomain, function(err) {
+        if (err) { return fn(err); }
+        collection.events.Validate.run(ctx, domain, function (err) {
+          if(err || domain.hasErrors()) { return done(err || errors); }
+          post();
+        });
+      });
+    }
+    else {
+      collection.doBeforeRequestEvent(ctx, beforeRequestDomain, function(err) {
+        if (err) { return fn(err); }
+        post();
+      });
+    }
+  };
+
 })(require('deployd/lib/resources/collection'));
 
+/*
+ * Extensions for 'deployd/lib/db'.Store
+ *
+ * override Store.prototype.update(query, object, fn) for debugging purpose
+ * add Store.prototype.distinct( query, fn) to respond to Collection.prototype.distinct
+ * add Store.prototype.min(      query, fn) to respond to Collection.prototype.min
+ * add Store.prototype.max(      query, fn) to respond to Collection.prototype.max
+ *
+ */
 (function(Store){
   'use strict';
+
+  var //_ = require('lodash'),
+    Code = require('mongodb').Code,
+    debug = require('debug')('db:extended');
 
   function stripFields(query) {
     if(!query) { return; }
@@ -161,6 +813,231 @@
         if (err) { return fn(err); }
         fn(null, values);
       });
+    });
+  };
+
+  /* function.js group functions are from
+   *  - https://gist.github.com/RedBeard0531/1886960
+   *  - https://gist.github.com/Pyrolistical/8139958
+   *
+   *   > load('functions.js')
+   *   > db.stuff.drop()
+   *   false
+   *   > db.stuff.insert({value:1})
+   *   > db.stuff.insert({value:2})
+   *   > db.stuff.insert({value:2})
+   *   > db.stuff.insert({value:2})
+   *   > db.stuff.insert({value:3})
+   *   > db.stuff.mapReduce(map, reduce, {finalize:finalize, out:{inline:1}}).results[0]
+   *   {
+   *     "_id" : 1,
+   *     "value" : {
+   *       "sum" : 10,
+   *       "min" : 1,
+   *       "max" : 3,
+   *       "count" : 5,
+   *       "diff" : 2,
+   *       "avg" : 2,
+   *       "variance" : 0.4,
+   *       "stddev" : 0.6324555320336759
+   *     }
+  }
+   */
+  function groupMap() {
+    /* global emit, pickValue, fieldName */
+    /* jshint validthis:true */
+
+    var value = pickValue(this, fieldName);
+    emit(1, {
+      sum: !value ? 0 : parseFloat(value), // the field you want stats for
+      min: (value === null || value === undefined) ? Infinity : parseFloat(value),
+      max: (value === null || value === undefined) ? -Infinity : parseFloat(value),
+      count: 1,
+      diff: 0
+    });
+  }
+
+  function groupReduce(key, values) {
+    return values.reduce(function reduce(previous, current/*, index, array*/) {
+      var delta = previous.sum/previous.count - current.sum/current.count;
+      var weight = (previous.count * current.count)/(previous.count + current.count);
+
+      return {
+        sum: previous.sum + current.sum,
+        min: Math.min(previous.min, current.min),
+        max: Math.max(previous.max, current.max),
+        count: previous.count + current.count,
+        diff: previous.diff + current.diff + delta*delta*weight
+      };
+    });
+  }
+
+  function groupFinalize(key, value) {
+    value.avg = value.sum / value.count;
+    value.population_variance = value.diff / value.count;
+    value.population_standard_deviation = Math.sqrt(value.population_variance);
+    value.sample_variance = value.diff / (value.count - 1);
+    value.sample_standard_deviation = Math.sqrt(value.sample_variance);
+    delete value.diff;
+    return value;
+  }
+
+  /*
+   * mapReduce syntax: collection.mapReduce(map, reduce, options, callback)
+   * => returns a promise if no callback is provided
+   *
+   * map: map Function
+   * reduce: reduce Function
+   * options: options objects                    (optionnal settings)
+   * callback: callback function(err, res, ...)  (optionnal settings)
+   *
+   * Available options for mapReduce
+   *  NAME                        TYPE        DEFAULT     Description and/or available options
+   * ----------------------------------------------------------------------------------------------------------------------
+   * - readPreference           | string    | null   | (ReadPreference.PRIMARY, ReadPreference.PRIMARY_PREFERRED,
+   *                            |           |        |  ReadPreference.SECONDARY, ReadPreference.SECONDARY_PREFERRED,
+   *                            |           |        |  ReadPreference.NEAREST)
+   * ----------------------------------------------------------------------------------------------------------------------
+   * - out                      | object    | null   | ({inline:1}, {replace:'collectionName'},
+   *                            |           |        | {merge:'collectionName'}, {reduce:'collectionName'})
+   * ----------------------------------------------------------------------------------------------------------------------
+   * - query                    | object    | null   | Query filter object.
+   * ----------------------------------------------------------------------------------------------------------------------
+   * - sort                     | object    | null   | Sorts the input objects using this key. Useful for optimization, 
+   *                            |           |        | like sorting by the emit key for fewer reduces.
+   * ----------------------------------------------------------------------------------------------------------------------
+   * - limit                    | number    | null   | Number of objects to return from collection.
+   * ----------------------------------------------------------------------------------------------------------------------
+   * - keeptemp                 | boolean   | false  | Keep temporary data.
+   * ----------------------------------------------------------------------------------------------------------------------
+   * - finalize                 | function  | null   | Finalize function.
+   *                            | or string |        |
+   * ----------------------------------------------------------------------------------------------------------------------
+   * - scope                    | object    | null   | Can pass in variables that can be access from map/reduce/finalize.
+   * ----------------------------------------------------------------------------------------------------------------------
+   * - jsMode                   | boolean   | false  | It is possible to make the execution stay in JS.
+   *                            |           |        | Provided in MongoDB > 2.0.X.
+   * ----------------------------------------------------------------------------------------------------------------------
+   * - verbose                  | boolean   | false  | Provide statistics on job execution time.
+   * ----------------------------------------------------------------------------------------------------------------------
+   * - bypassDocumentValidation | boolean   | false  | Allow driver to bypass schema validation in MongoDB 3.2 or higher.
+   * ----------------------------------------------------------------------------------------------------------------------
+   *
+   * collection.mapReduce(mapFn, reduceFn, {finalize: finalizeFn, out : {inline: 1}, verbose:true}, function(err, results, stats) {})
+   */
+  Store.prototype.group = function(query, fn) {
+
+    var store = this;
+    if (typeof query === 'function') {
+      fn = query;
+      query = {};
+    }
+    else if (query) {
+      this.scrubQuery(query);
+    }
+
+    var fields = stripFields(query),
+      options = stripOptions(query),
+      field = typeof fields === 'object' ? Object.keys(fields)[0] : fields,
+      pickValue = function(row, fieldName) {
+          var parts = fieldName.split('.'),
+            name = parts.pop(),
+            empty = {};
+          if (parts.length) {
+            parts.forEach(function(part){
+              row = (typeof row[part] === 'object') ? row[part] : empty;
+            });
+          }
+          return !row[name] ? null : parseFloat(row[name]);
+        },
+      groupOptions = {
+        finalize: groupFinalize,
+        out:      { inline:1 },
+        query: query,
+        sort: options.sort || null,
+        limit: options.limit || null,
+        scope: {
+          pickValue: new Code(pickValue.toString()),
+          fieldName: field
+        }
+      };
+
+    store.getCollection(function (err, col) {
+      if (err) { return fn(err); }
+      col.mapReduce(groupMap, groupReduce, groupOptions, function(err, results/*, stats*/) {
+        if (err) { return fn(err); }
+        fn(null, results);
+      });
+    });
+
+  };
+
+  /**
+   * Update an object or objects in the store that match the given query.
+   *
+   * Example:
+   *
+   *     db
+   *       .connect({host: 'localhost', port: 27015, name: 'test'})
+   *       .createStore('testing-store')
+   *       .update({id: '<an object id>'}, fn)
+   *
+   * @param {Object} query
+   * @param {Object} object
+   * @param {Function} callback(err, obj)
+   */
+
+  Store.prototype.update = function (query, object, fn) {
+    var store = this,
+      multi = false,
+      command = {};
+
+    if(typeof query === 'string') { query = {id: query}; }
+    if(typeof query !== 'object') { throw new Error('update requires a query object or string id'); }
+    if(query.id) {
+      store.identify(query);
+    }  else {
+      multi = true;
+    }
+
+    debug('update - 1 -   query %j', query);
+    debug('update - 1 -  object %j', object);
+
+    stripFields(query);
+
+    //Move $ queries outside of the $set command
+    Object.keys(object).forEach(function(k) {
+      if (k.indexOf('$') === 0) {
+        command[k] = object[k];
+        delete object[k];
+      }
+    });
+
+    debug('update - 2 -   query %j', query);
+    debug('update - 2 -  object %j', object);
+    debug('update - 2 - command %j', command);
+
+    if(Object.keys(object).length) {
+      command.$set = object;
+    }
+
+    multi = query._id ? false : true;
+
+    debug('update - 3 - command %j', command);
+
+    store.getCollection(function (err, col) {
+      if (err) {
+        fn(err);
+        return;
+      }
+      col.update(query, command, { multi: multi }, function (err, r) {
+        if (err) {
+          fn(err);
+          return;
+        }
+        store.identify(query);
+        fn(err, r ? { count: r.result.n } : null);
+      }, multi);
     });
   };
 
