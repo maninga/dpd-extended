@@ -15,5 +15,10 @@
   ],
   "private": true,
   "author": "-",
-  "license": "NONE"
+  "license": "MIT",
+  "dependencies": {
+    "date.js": "~0.2.0",
+    "moment": "^2.10.6",
+    "validation": "0.0.1"
+  }
 }

@@ -1,4 +1,7 @@
-'use strict';
+
+/* global require:false, process:false */
+
+var uuid = require('deployd/lib/util/uuid');
 
 var extension = {};
 
@@ -13,17 +16,20 @@ var groupIds = extension.groupIds = [
 var suggarIds = extension.suggarIds = ['count', 'distinct', 'index-of'].concat(groupIds);
 
 var isIdentifier = extension.isIdentifier = function isIdentifier(str) {
+  'use strict';
   str = str || '';
 
-  if (str.length === 16 && /[a-z]/.test(str) && /[a-z]/.test(str) && /^[a-z0-9]+$/.test(str)) {
+  if (uuid.isObjectID(str.toString())) {
     return true;
-  }
-  else {
+    } else if (str.length === 16 && /[a-z]/.test(str) && /[a-z]/.test(str) && /^[a-z0-9]+$/.test(str)) {
+    return true;
+  } else {
     return false;
   }
 };
 
 function extendConfig() {
+  'use strict';
   /*
    * Extensions for 'deployd/lib/config-loader'
    *
@@ -43,8 +49,7 @@ function extendConfig() {
           server.options.env = 'development';
           fn(err, res);
         });
-      }
-      else {
+      } else {
         return Config._loadConfig(basepath, server, fn);
       }
     };
@@ -52,6 +57,7 @@ function extendConfig() {
 }
 
 function extendScript() {
+  'use strict';
   /*
    * Extensions for 'deployd/lib/script'
    *
@@ -81,6 +87,7 @@ function extendScript() {
 }
 
 function extendCollection() {
+  'use strict';
   /*
    * Extensions for 'deployd/lib/resources/collection'
    *
@@ -109,6 +116,7 @@ function extendCollection() {
     var _ = require('lodash'),
       debug = require('debug')('collection:extended'),
       dot = require('dot-object'),
+      moment = require('moment'),
       date = require('date.js'),
       validation = require('validation');
 
@@ -138,7 +146,19 @@ function extendCollection() {
         if(validation.exists(val)) {
           // coercion
           if(type === 'number') { val = Number(val); }
-          if(type === 'date') { val = (val instanceof Date) ? val : date(val); }
+          if(type === 'date' && !(val instanceof Date)) {
+            try {
+              var temp = moment(val);
+              if (!temp.isValid()) {
+                temp = moment(date(val));
+              }
+
+              if (temp.isValid()) {
+                val = new Date(temp);
+              }
+            }
+            catch (ex) {}
+          }
 
           if(!validation.isType(val, type)) {
             debug('failed to validate %s as %s', key, type);
@@ -242,8 +262,7 @@ function extendCollection() {
         if (ctx.query.$fields) {
           id = ctx.query.$fields;
           delete ctx.query.$fields;
-        }
-        else {
+        } else {
           id = ctx.url.split('/').filter(function(p) { return p; })[1];
         }
         this.indexOf(id, ctx, ctx.done);
@@ -370,12 +389,10 @@ function extendCollection() {
             matchingKeys.forEach(function(k){
               sanitized[k] = adaptValue(copy[k], subTypes[k], typeof copy[k]);
             });
-          }
-          else {
+          } else {
             sanitized[key] = val;
           }
-        }
-        else {
+        } else {
           sanitized[key] = adaptValue(val, expected, actual);
         }
       });
@@ -415,8 +432,7 @@ function extendCollection() {
             matchingKeys.forEach(function(k){
               sanitized[k] = adaptValue(query[k], subTypes[k], typeof query[k]);
             });
-          }
-          else {
+          } else {
             sanitized[key] = val;
           }
         }
@@ -568,8 +584,7 @@ function extendCollection() {
                   dot.set(key, val, obj, true);
                 }
               });
-            }
-            else {
+            } else {
               debug('############ typeof commands[key:%s] is %s, very bad !', key, typeof commands[key]);
             }
           });
@@ -597,7 +612,7 @@ function extendCollection() {
         // client = ctx.dpd,
         // errors,
         data,
-        sanitizedQuery = this.sanitizeQuery(query);
+        sanitizedQuery;
 
       function done(err, result) {
         if (ctx.res.internal) {
@@ -697,8 +712,7 @@ function extendCollection() {
                 }
               });
             });
-          }
-          else {
+          } else {
             // domain for onGet event scripts
             data = result;
             var domain = collection.createDomain(data, errors);
@@ -822,8 +836,7 @@ function extendCollection() {
           if(!obj) {
             if (Object.keys(sanitizedQuery) === 1) {
               return done(new Error('No object exists with that id'));
-            }
-            else {
+            } else {
               return done(new Error('No object exists that matches that query'));
             }
           }
@@ -865,8 +878,7 @@ function extendCollection() {
 
             if(collection.shouldRunEvent(collection.events.Put, ctx)) {
               collection.events.Put.run(ctx, domain, commit);
-            }
-            else {
+            } else {
               commit();
             }
           }
@@ -890,8 +902,7 @@ function extendCollection() {
               if(err || domain.hasErrors()) { return done(err || errors); }
               runPutEvent(err);
             });
-          }
-          else {
+          } else {
             runPutEvent();
           }
         });
@@ -925,8 +936,7 @@ function extendCollection() {
 
             commit();
           });
-        }
-        else {
+        } else {
           commit();
         }
       }
@@ -949,8 +959,7 @@ function extendCollection() {
             post();
           });
         });
-      }
-      else {
+      } else {
         collection.doBeforeRequestEvent(ctx, beforeRequestDomain, function(err) {
           if (err) { return fn(err); }
           post();
@@ -962,6 +971,7 @@ function extendCollection() {
 }
 
 function extendStore() {
+  'use strict';
   /*
    * Extensions for 'deployd/lib/db'.Store
    *
@@ -974,7 +984,8 @@ function extendStore() {
   (function(Store){
 
     var _ = require('lodash'),
-      Code = require('mongodb').Code,
+      mongo = require('mongodb'),
+      Code = mongo.Code,
       debug = require('debug')('db:extended');
 
     function stripFields(query) {
@@ -1226,7 +1237,7 @@ function extendStore() {
           fn(err);
           return;
         }
-        if(typeof query._id === 'string') {
+        if(query._id) {
           if(fields) {
             col.findOne(query, fields, options, function (err, obj) {
               if (err) {
@@ -1236,8 +1247,7 @@ function extendStore() {
               store.identify(query);
               fn(err, store.identify(obj));
             });
-          }
-          else {
+          } else {
             col.findOne(query, options, function (err, obj) {
               if (err) {
                 fn(err);
@@ -1247,25 +1257,21 @@ function extendStore() {
               fn(err, store.identify(obj));
             });
           }
-        }
-        else {
+        } else {
           var cursor;
           if(fields) {
             cursor = col.find(query, fields);
-          }
-          else {
+          } else {
             cursor = col.find(query);
           }
           if (typeof options.sort === 'object') {
             if (Array.isArray(options.sort)) {
               if (Array.isArray(options.sort[0])) {
                 cursor = cursor.sort(_.zipObject(options.sort));
-              }
-              else {
+              } else {
                 cursor = cursor.sort(_.zipObject([options.sort]));
               }
-            }
-            else {
+            } else {
               cursor = cursor.sort(options.sort);
             }
           }
@@ -1321,7 +1327,7 @@ function extendStore() {
       if(typeof query === 'string') { query = {id: query}; }
       if(typeof query !== 'object') { throw new Error('update requires a query object or string id'); }
       if(query.id) {
-        store.identify(query);
+        this.scrubQuery(query);
       }  else {
         multi = true;
       }
@@ -1371,6 +1377,8 @@ function extendStore() {
 }
 
 extension.extend = function() {
+  'use strict';
+
   extendConfig();
   extendScript();
   extendCollection();
