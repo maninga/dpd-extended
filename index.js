@@ -2,6 +2,7 @@
 /* global require:false, process:false */
 
 var uuid = require('deployd/lib/util/uuid');
+var createFunction = require('deployd/lib/util/create-function');
 
 var extension = {};
 
@@ -145,8 +146,15 @@ function extendCollection() {
 
         if(validation.exists(val)) {
           // coercion
-          if(type === 'number') { val = Number(val); }
-          if(type === 'date' && !(val instanceof Date)) {
+          if(type === 'number') {
+            val = Number(val);
+          } else if (type === 'function' && typeof val !== 'function') {
+            try {
+              val = createFunction(val);
+            }
+            catch (ex) {}
+
+          } else if(type === 'date' && !(val instanceof Date)) {
             try {
               var temp = moment(val);
               if (!temp.isValid()) {
