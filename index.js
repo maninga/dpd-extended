@@ -18,11 +18,11 @@ var suggarIds = extension.suggarIds = ['count', 'distinct', 'index-of'].concat(g
 
 var isIdentifier = extension.isIdentifier = function isIdentifier(str) {
   'use strict';
-  str = str || '';
+  str = (str || '').toString();
 
-  if (uuid.isObjectID(str.toString())) {
+  if (str.length === 24 && uuid.isObjectID(str)) {
     return true;
-    } else if (str.length === 16 && /[a-z]/.test(str) && /[a-z]/.test(str) && /^[a-z0-9]+$/.test(str)) {
+  } else if (str.length === 16 && /[a-z]/.test(str) && /[a-z]/.test(str) && /^[a-z0-9]+$/.test(str)) {
     return true;
   } else {
     return false;
@@ -150,9 +150,11 @@ function extendCollection() {
             val = Number(val);
           } else if (type === 'function' && typeof val !== 'function') {
             try {
-              val = createFunction(val);
+              val = createFunction([{require: require}, val]);
             }
-            catch (ex) {}
+            catch (ex) {
+              debug('Error from createFunction: %s\n  Stack: %s', ex, ex.stack);
+            }
 
           } else if(type === 'date' && !(val instanceof Date)) {
             try {
@@ -455,8 +457,8 @@ function extendCollection() {
     Collection.prototype.execCommands = function (type, obj, commands, previous) {
       // var storeCommands = null;
       debug('execCommands -> -------------- type: %s ----------------', type);
-      debug('execCommands -> obj:%s\n', JSON.stringify(obj, null, 2));
-      debug('execCommands -> commands:%s\n', JSON.stringify(commands), null, 2);
+      debug('execCommands -> obj:%j\n', obj);
+      debug('execCommands -> commands:%j\n', commands);
 
       try {
         if(type === 'insert') {
@@ -477,7 +479,7 @@ function extendCollection() {
         }
 
         if(type === 'update') {
-          debug('execCommands -> previous:%s', JSON.stringify(previous, null, 2));
+          debug('execCommands -> previous:%j', previous);
           Object.keys(commands).forEach(function (key) {
             if(typeof commands[key] === 'object') {
               Object.keys(commands[key]).forEach(function (k) {
