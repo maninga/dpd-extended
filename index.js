@@ -980,6 +980,46 @@ function extendCollection() {
   })(require('deployd/lib/resources/collection'));
 }
 
+function extendFiles() {
+  'use strict';
+
+  var path = require('path');
+  var url  = require('url');
+
+  (function (Files) {
+
+    var send = require('deployd/node_modules/send');
+    var respond = require('deployd/node_modules/doh').createResponder();
+
+    Files.prototype.handle = function (ctx, next) {
+      if(ctx.req && ctx.req.method !== 'GET') { return next(); }
+
+      var pathname = url.parse(ctx.url).pathname;
+      var rootDirs = Array.isArray(this.public) ? this.public.map(function (fld) { return path.resolve(fld); }) : [ path.resolve(this.public)];
+
+
+      function doSend(ctx, pathname, rootdirIndex) {
+
+        var tryNext = function(/*err*/) {
+          doSend(ctx, pathname, rootdirIndex+1);
+        };
+
+        var respondNotFound = function(/*err*/) {
+          ctx.res.statusCode = 404;
+          respond('Resource Not Found', ctx.req, ctx.res);
+        };
+
+        send(ctx.req, pathname, {root: rootDirs[rootdirIndex]})
+          .on('error', rootdirIndex<rootDirs.length ? tryNext : respondNotFound)
+          .pipe(ctx.res);
+      }
+
+      doSend(ctx, pathname, 0);
+    };
+
+  })(require('deployd/lib/resources/files'));
+}
+
 function extendStore() {
   'use strict';
   /*
@@ -1392,6 +1432,7 @@ extension.extend = function() {
   extendConfig();
   extendScript();
   extendCollection();
+  extendFiles();
   extendStore();
 };
 
