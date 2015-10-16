@@ -498,6 +498,7 @@ function extendCollection() {
                   if(!prev) { prev = 0; }
                   prev = parseFloat(prev);
                   val = prev + parseFloat(val);
+                  dot.del(key, obj);
                   dot.set(key, val, obj, true);
                 }
                 if(k === '$mul') { /* added */
@@ -505,11 +506,13 @@ function extendCollection() {
                   if(!prev) { prev = 0; }
                   prev = parseFloat(prev);
                   val = prev * parseFloat(val);
+                  dot.del(key, obj);
                   dot.set(key, val, obj, true);
                 }
                 if(k === '$rename') { /* added */
                   debug('\t $rename --- before setting obj[key:%s]', key);
                   // we need to send $unset and $rename to the store
+                  dot.del(val, obj);
                   dot.set(val, prev, obj, true);
                   dot.del(key, obj);
                   // storeCommands = storeCommands || {};
@@ -518,6 +521,7 @@ function extendCollection() {
                 }
                 if(k === '$set') { /* added */
                   debug('\t $set --- before setting obj[key:%s] to val:%s', key, val);
+                  dot.del(key, obj);
                   dot.set(key, val, obj, true);
                   debug('\t $set --- after setting obj[key:%s] to val:%s --> %s', key, val, dot.pick(key, obj));
                 }
@@ -541,6 +545,7 @@ function extendCollection() {
                   if(!prev) { prev = 0; }
                   prev = parseFloat(prev);
                   if (prev < val) {
+                    dot.del(key, obj);
                     dot.set(key, val, obj, true);
                   }
                 }
@@ -563,6 +568,7 @@ function extendCollection() {
                   if(Array.isArray(prev)) {
                     val = [].concat(prev).concat(val);
                   }
+                  dot.del(key, obj);
                   dot.set(key, val, obj, true);
                 }
                 if (k === '$pull') {
@@ -571,6 +577,7 @@ function extendCollection() {
                     val = prev.filter(function(item) {
                       return item !== val;
                     });
+                    dot.del(key, obj);
                     dot.set(key, val, obj, true);
                   }
                 }
@@ -581,6 +588,7 @@ function extendCollection() {
                       val = prev.filter(function(item) {
                         return val.indexOf(item) === -1;
                       });
+                      dot.del(key, obj);
                       dot.set(key, val, obj, true);
                     }
                   }
@@ -591,6 +599,7 @@ function extendCollection() {
                   if(Array.isArray(prev)) {
                     val = _.union(prev, val);
                   }
+                  dot.del(key, obj);
                   dot.set(key, val, obj, true);
                 }
               });
@@ -861,6 +870,7 @@ function extendCollection() {
           keys = Object.keys(item);
           dot.object(item);
           keys.forEach(function (key) {
+            dot.del(key, obj);
             dot.copy(key, key, item, obj);
           });
 
