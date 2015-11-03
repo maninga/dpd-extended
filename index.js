@@ -1245,7 +1245,7 @@ function extendStore() {
           limit: options.limit || null,
           scope: {
             pickValue: new Code(pickValue.toString()),
-            fieldName: (field === 'id' : '_id' : field)
+            fieldName: (field === 'id' ? '_id' : field)
           }
         };
 
