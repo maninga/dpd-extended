@@ -1092,6 +1092,8 @@ function extendStore() {
         options = stripOptions(query),
         field = typeof fields === 'object' ? Object.keys(fields)[0] : fields;
 
+      field = (field === 'id') ? '_id' : field;
+
       store.getCollection(function (err, col) {
         if (err) { return fn(err); }
         col.distinct(field, query, options, function(err, values) {
@@ -1243,7 +1245,7 @@ function extendStore() {
           limit: options.limit || null,
           scope: {
             pickValue: new Code(pickValue.toString()),
-            fieldName: field
+            fieldName: (field === 'id' : '_id' : field)
           }
         };
 
