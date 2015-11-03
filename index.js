@@ -479,8 +479,12 @@ function extendCollection() {
         }
 
         if(type === 'update') {
+
+          dot.override = true;
+
           debug('execCommands -> previous:%j', previous);
           Object.keys(commands).forEach(function (key) {
+
             if(typeof commands[key] === 'object') {
               Object.keys(commands[key]).forEach(function (k) {
                 if(k[0] !== '$') { return; }
@@ -498,22 +502,19 @@ function extendCollection() {
                   if(!prev) { prev = 0; }
                   prev = parseFloat(prev);
                   val = prev + parseFloat(val);
-                  dot.del(key, obj);
-                  dot.set(key, val, obj, true);
+                  dot.set(key, val, obj);
                 }
                 if(k === '$mul') { /* added */
                   debug('\t $mul --- before setting obj[key:%s]', key);
                   if(!prev) { prev = 0; }
                   prev = parseFloat(prev);
                   val = prev * parseFloat(val);
-                  dot.del(key, obj);
-                  dot.set(key, val, obj, true);
+                  dot.set(key, val, obj);
                 }
                 if(k === '$rename') { /* added */
                   debug('\t $rename --- before setting obj[key:%s]', key);
                   // we need to send $unset and $rename to the store
-                  dot.del(val, obj);
-                  dot.set(val, prev, obj, true);
+                  dot.set(val, prev, obj);
                   dot.del(key, obj);
                   // storeCommands = storeCommands || {};
                   // storeCommands.$unset = storeCommands.$unset || {};
@@ -521,8 +522,7 @@ function extendCollection() {
                 }
                 if(k === '$set') { /* added */
                   debug('\t $set --- before setting obj[key:%s] to val:%s', key, val);
-                  dot.del(key, obj);
-                  dot.set(key, val, obj, true);
+                  dot.set(key, val, obj);
                   debug('\t $set --- after setting obj[key:%s] to val:%s --> %s', key, val, dot.pick(key, obj));
                 }
                 if(k === '$unset') { /* added */
@@ -537,7 +537,7 @@ function extendCollection() {
                   if(!prev) { prev = 0; }
                   prev = parseFloat(prev);
                   if (prev > val) {
-                    dot.set(key, val, obj, true);
+                    dot.set(key, val, obj);
                   }
                 }
                 if(k === '$max') { /* added */
@@ -545,22 +545,20 @@ function extendCollection() {
                   if(!prev) { prev = 0; }
                   prev = parseFloat(prev);
                   if (prev < val) {
-                    dot.del(key, obj);
-                    dot.set(key, val, obj, true);
+                    dot.set(key, val, obj);
                   }
                 }
                 if(k === '$currentDate') { /* added */
                   debug('\t $currentDate --- before setting obj[key:%s]', key);
-                  dot.str(key, new Date().getTime(), obj);
-                  dot.set(key, new Date().getTime(), obj, true);
+                  dot.set(key, new Date().getTime(), obj);
                 }
                 if(k === '$push') {
                   debug('\t $push --- before setting obj[key:%s]', key);
                   if(Array.isArray(prev)) {
                     val = [].concat(prev).push(val);
-                    dot.set(key, val, obj, true);
+                    dot.set(key, val, obj);
                   } else {
-                    dot.set(key, [val], obj, true);
+                    dot.set(key, [val], obj);
                   }
                 }
                 if(k === '$pushAll') {
@@ -568,8 +566,7 @@ function extendCollection() {
                   if(Array.isArray(prev)) {
                     val = [].concat(prev).concat(val);
                   }
-                  dot.del(key, obj);
-                  dot.set(key, val, obj, true);
+                  dot.set(key, val, obj);
                 }
                 if (k === '$pull') {
                   debug('\t $pull --- before setting obj[key:%s]', key);
@@ -577,8 +574,7 @@ function extendCollection() {
                     val = prev.filter(function(item) {
                       return item !== val;
                     });
-                    dot.del(key, obj);
-                    dot.set(key, val, obj, true);
+                    dot.set(key, val, obj);
                   }
                 }
                 if (k === '$pullAll') {
@@ -588,8 +584,7 @@ function extendCollection() {
                       val = prev.filter(function(item) {
                         return val.indexOf(item) === -1;
                       });
-                      dot.del(key, obj);
-                      dot.set(key, val, obj, true);
+                      dot.set(key, val, obj);
                     }
                   }
                 }
@@ -599,14 +594,15 @@ function extendCollection() {
                   if(Array.isArray(prev)) {
                     val = _.union(prev, val);
                   }
-                  dot.del(key, obj);
-                  dot.set(key, val, obj, true);
+                  dot.set(key, val, obj);
                 }
               });
             } else {
               debug('############ typeof commands[key:%s] is %s, very bad !', key, typeof commands[key]);
             }
           });
+
+          dot.override = false;
         }
       } catch(e) {
         debug('error while executing commands', type, obj, commands);
