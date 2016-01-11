@@ -285,8 +285,20 @@ function extendCollection() {
         return;
       }
 
+      if (ctx.req.method == "GET" && ctx.query.$count) {
+        delete ctx.query.$count;
+        this.count(ctx, ctx.done);
+        return;
+      }
+
       if (ctx.req.method === 'GET' && id === 'distinct') {
         delete ctx.query.id;
+        this.distinct(ctx, ctx.done);
+        return;
+      }
+
+      if (ctx.req.method == "GET" && ctx.query.$distinct) {
+        delete ctx.query.$distinct;
         this.distinct(ctx, ctx.done);
         return;
       }
